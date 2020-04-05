@@ -327,7 +327,7 @@ class _sparse_matmul(torch.autograd.Function):
   # Given a binary mask of 0s and 1s,
   # Construct look-up table for efficient execution on GPUs
   @staticmethod
-  def make_dxx_lut(mask, block, step, trans):
+  def make_dxx_lut(mask, block, step, trans, transform = lambda idx: idx):
     # load-balancing
     _empty = torch.tensor([], dtype=torch.int64, device=mask.device)
     segments = _empty.clone()
@@ -363,7 +363,7 @@ class _sparse_matmul(torch.autograd.Function):
       nnz = torch.nonzero(mask.transpose(1, 2))
     num_blocks = nnz.size(0)
     offsets = torch.min(offsets, (num_blocks - 1)*torch.ones_like(offsets))
-    idx = nnz[:, 2]*block
+    idx = transform(nnz[:, 2]*block)
     xincs = idx.clone() 
     xincs[1:] -= idx[:-1]
     # divide block into multiple steps

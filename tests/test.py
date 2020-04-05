@@ -215,6 +215,65 @@ def test_softmax(Z, H, M, N, scale, rho, block):
   triton_ts = bench_softmax_triton(x, scale, mask, layout, block) 
   print(f'{rho*100}% sparse (block = {block}): {triton_ts*1e3:2.4f}ms')
 
+###########
+# CONV    #
+###########
+
+def run_conv2d_reference(x, w, dy, layout, block):
+  # mask w
+  w = w.view(1, 1, w.shape[0], w.shape[1])
+  layout = layout.view(1, layout.shape[0], layout.shape[1])
+  w = sparse_to_dense(w, layout, block)
+  w = w.view(w.shape[2], w.shape[3])
+  # create conv2d
+  conv2d = torch.nn.Conv2d(w.shape[1], w.shape[0], 1, bias=False).cuda()
+  conv2d.weight.data[:,:,0,0] = w
+  # run conv2d
+  y = conv2d(x)
+  # compute gradients
+  y.backward(dy)
+  dx = x.grad.clone()
+  dw = conv2d.weight.grad.clone()
+  dw = dense_to_sparse(dw.view(1, 1, dw.shape[0], dw.shape[1]), layout, block)
+  # reset gradients
+  x.grad.zero_()
+  conv2d.weight.grad.zero_()
+  return y, dx, dw
+
+def run_conv2d_triton(x, w, dy, layout, block):
+  N, C, H, W = x.shape
+  K, C = w.shape
+  w = w.view(1, 1, w.shape[0], w.shape[1])
+  w = dense_to_sparse(w, layout.unsqueeze(0), block).squeeze(0)
+  w.retain_grad()
+  sparse_conv2d = SparseConv2d(layout, block, N, C, H, W, K)
+  y = sparse_conv2d(x, w)
+  # compute gradients
+  y.backward(dy)
+  dx = x.grad.clone()
+  dw = w.grad.clone()
+  return y, dx, dw
+
+def test_conv2d(N, C, H, W, K, R, S, rho, block):
+  # probability distribution
+  probs = torch.Tensor([rho, 1-rho])
+  generator = torch.distributions.categorical.Categorical(probs)
+  # initialize tensors
+  layout = generator.sample((K//block, C//block))
+  x = torch.rand((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda()
+  w = torch.rand((K, C), dtype=torch.float32, requires_grad=True).cuda()
+  dy = torch.rand((N, K, H, W), dtype=torch.float32).cuda()
+  x.retain_grad()
+  w.retain_grad()
+  # execute
+  ry, rdx, rdw = run_conv2d_reference(x, w, dy, layout, block)
+  ty, tdx, tdw = run_conv2d_triton(x, w, dy, layout, block)
+  print((ry - ty).abs().max())
+  print((rdx - tdx).abs().max())
+  print((rdw - tdw).abs().max())
+  #print(rdx)
+  #print(tdx)
+
 #############
 # Run tests #
 #############
@@ -223,8 +282,10 @@ if __name__ == '__main__':
   # test softmax
   #test_softmax(3, 2, 256, 2048, 0.5, 0.7, 16)
   # test matmul
-  for mode in ['sdd', 'dsd', 'dds']:
-    test_mm(3, 2, 256, 512, 384, 0.5, mode, False, False, 32)
-    test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
-    test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
-    test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
+  #for mode in ['sdd', 'dsd', 'dds']:
+  #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, False, 32)
+  #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
+  #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
+  #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
+  test_conv2d(8, 64, 16, 16, 128, 1, 1, 0., 32)
+  pass
