@@ -160,12 +160,31 @@ class _sparse_conv2d(torch.autograd.Function):
     return _sparse_conv2d.locks
 
   @staticmethod
-  def make_dds_lut(mask, block, step, trans, sizes, strides):
-    return _sparse_matmul.make_dxx_lut(mask.unsqueeze(0), block, step, trans)
+  def make_dds_lut(layout, block, step, trans, sizes, strides):
+    headers = torch.empty((0,), dtype=torch.int64)
+    deltas  = torch.empty((0,), dtype=torch.int64)
+    total = 0
+    width = 0
+    for k in range(layout.shape[0]):
+        nnz = layout[k, :, :, :].nonzero()
+        # pointer increments
+        coffset = nnz[:,0]*strides[2] + nnz[:,1]*strides[1] + nnz[:,2]*strides[0]
+        noffset = nnz[step:,0]*strides[2] + nnz[step:,1]*strides[1] + nnz[step:,2]*strides[0]
+        dd  = torch.cat((coffset[:step], noffset - coffset[:-step]))
+        deltas = torch.cat((deltas, dd))
+        # create headers
+        size = dd.shape[0]
+        hh = torch.tensor([size, total], dtype=torch.int64)
+        total += size
+        headers = torch.cat((headers, hh))
+        # update width
+        width += 1
+    lut = torch.cat((headers, deltas))
+    return lut, None, width
   
   @staticmethod
-  def make_sdd_lut(mask, block):
-    return _sparse_matmul.make_sdd_lut(mask.unsqueeze(0), block)
+  def make_sdd_lut(layout, block):
+    return _sparse_matmul.make_sdd_lut(layout.unsqueeze(0), block)
 
   @staticmethod
   def unpack(idx, N, H, W):
@@ -206,7 +225,7 @@ class _sparse_conv2d(torch.autograd.Function):
   # Sparse = Dense x Dense
   @staticmethod
   def _sdd_conv2d(a, b,
-                  mask, block, lut, num_locks, width, 
+                  layout, block, lut, num_locks, width, 
                   bench, time):
     # sanity checks
     a_dtype = a.dtype
@@ -337,10 +356,8 @@ class SparseConv2d:
     self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
     db_delta_a = _sparse_conv2d.make_db_delta(N, H, W, W*H*C, W, 1, 8)
     db_delta_b = _sparse_conv2d.make_db_delta(N, H, W, W*H*K, W, 1, 8)
-    print(db_delta_a[:10])
-    print(db_delta_b[:10])
-    print(N, H, W, db_delta_a.shape)
     self.db_lut = torch.cat((self.db_lut, db_delta_a, db_delta_b))
+    exit()
     # timings
     self.bench = False
     self.c_time = [None]
