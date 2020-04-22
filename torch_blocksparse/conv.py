@@ -259,22 +259,22 @@ class _sparse_conv2d(torch.autograd.Function):
     assert a_dtype == b_dtype
     assert Na == Nb
     # create kernel
-    defines = {'NAME': 'sdd_conv2d', 'TYPE': a.dtype,
-               'TM': block, 'TL': 8, 'TN': block, 'BLOCK': block,
-               'TZ': 1, 'DW': True}
-    cache = _sparse_conv2d.sdd_cache
-    kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a_dtype))
+    #defines = {'NAME': 'sdd_conv2d', 'TYPE': a.dtype,
+    #           'TM': block, 'TL': 8, 'TN': block, 'BLOCK': block,
+    #           'TZ': 1, 'DW': True}
+    #cache = _sparse_conv2d.sdd_cache
+    #kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a_dtype))
     # create semaphores
-    locks = _sparse_conv2d.get_locks(2*width*num_locks)
+    #locks = _sparse_conv2d.get_locks(2*width*num_locks)
     # create output
-    c = torch.empty((width, block, block), dtype=a.dtype, device=a.device)
-    kernel(a, b, c, 
-          Na, H, W, K,
-          a.stride(0), a.stride(1), a.stride(2),
-          b.stride(0), b.stride(1), b.stride(2),
-          lut, locks, num_locks, 
-          grid = lambda opt: [width, opt.d('TZ')], 
-          bench = bench)
+    c = torch.empty((layout.sum()*block, block), dtype=a.dtype, device=a.device)
+    #kernel(a, b, c, 
+    #      Na, H, W, K,
+    #      a.stride(0), a.stride(1), a.stride(2),
+    #      b.stride(0), b.stride(1), b.stride(2),
+    #      lut, locks, num_locks, 
+    #      grid = lambda opt: [width, opt.d('TZ')], 
+    #      bench = bench)
     # save for backward pass
     return c
 
@@ -287,10 +287,13 @@ class _sparse_conv2d(torch.autograd.Function):
     N, Ca, H, W = a.shape
     K, Cb, R, S = layout.shape[0]*block, layout.shape[1]*block,\
                   layout.shape[2], layout.shape[3]
-    P = H - R + 1
-    Q = W - S + 1
     if is_dx:
       Cb, K = K, Cb
+      P = H + R - 1
+      Q = W + S - 1
+    else:
+      P = H - R + 1
+      Q = W - S + 1
     assert a.dtype == b.dtype
     assert Ca == Cb
     # create kernel

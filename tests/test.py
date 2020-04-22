@@ -245,15 +245,27 @@ def run_conv2d_reference(x, w, dy, layout, block):
   conv2d.weight.data.copy_(mask_weights(w, layout, block))
   # run conv2d
   y = conv2d(x)
-  return y, None, None
+  # backward
+  y.backward(dy)
+  dx = x.grad.clone()
+  dw = conv2d.weight.grad.clone()
+  dw = compress_weights(dw, layout, block)
+  return y, dx, dw
 
 def run_conv2d_triton(x, w, dy, layout, block):
+  # create conv2d
   N, C, H, W = x.shape
   K = dy.shape[1]
   sparse_conv2d = SparseConv2d(layout, block, N, C, H, W, K)
+  # run conv2d
   w = compress_weights(w, layout, block)
+  w.retain_grad()
   y = sparse_conv2d(x, w)
-  return y, None, None
+  # backward
+  y.backward(dy)
+  dx = x.grad.clone()
+  dw = w.grad.clone()
+  return y, dx, dw
 
 def test_conv2d(N, C, H, W, K, R, S, rho, block):
   # probability distribution
@@ -261,15 +273,16 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   generator = torch.distributions.categorical.Categorical(probs)
   # initialize tensors
   layout = generator.sample((K//block, C//block, R, S))
-  x = torch.rand((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda()
-  w = torch.rand((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
-  dy = torch.rand((N, K, H - R + 1, W - S + 1), dtype=torch.float32).cuda()
+  x = torch.ones((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda()
+  w = torch.ones((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
+  dy = torch.ones((N, K, H - R + 1, W - S + 1), dtype=torch.float32).cuda()
   x.retain_grad()
   w.retain_grad()
   # execute
   ry, rdx, rdw = run_conv2d_reference(x, w, dy, layout, block)
   ty, tdx, tdw = run_conv2d_triton(x, w, dy, layout, block)
   print((ry - ty).abs().max())
+  print(rdx[0,0,0,0], tdx[0,0,0,0])
   #print((ry - ty).abs().max())
   #print((rdx - tdx).abs().max())
   #print((rdw - tdw).abs().max())
