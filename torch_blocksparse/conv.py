@@ -170,6 +170,15 @@ class _sparse_conv2d(torch.autograd.Function):
     width = 0
     div = block // step
     # pointer increments for b
+    # if is_dx:
+    #   repeats = block*torch.ones(layout.shape[0], dtype=torch.int64)
+    #   rilayout = layout.repeat_interleave(repeats, dim=0)
+    #   rilayout = rilayout.permute(0, 2, 3, 1)
+    #   rilayout = rilayout.view(-1, rilayout.shape[-1])
+    #   size = rilayout.sum()
+    #   rilayout[rilayout > 0] = 1 + torch.arange(size)
+    #   idx = rilayout.T[rilayout.T > 0] - 1
+    # else:
     b_offset = torch.arange(layout.sum())
     b_offset = b_offset * block * block
     b_deltas = b_offset.clone()
