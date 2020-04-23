@@ -11,12 +11,12 @@ src = '''
                         int N, int P, int Q, int K,
                         // a strides
                         int stride_na __multipleof(8),
-                        int stride_ca __multipleof(8),
                         int stride_ha __multipleof(8),
+                        int stride_wa __multipleof(8),
                         // c strides
                         int stride_nc __multipleof(8),
-                        int stride_kc __multipleof(8),
                         int stride_hc __multipleof(8),
+                        int stride_wc __multipleof(8),
                         // lut and locks
                         int* lut, int* locks, int nlocks) {
      /* ---------------- */
@@ -38,10 +38,8 @@ src = '''
     int  b_delta[TL]  = *pb_delta;
     int  ra_c[TM] = off_cc * TM + 0 ... TM;
     int  rb_k[TN] = off_ck * TN + 0 ... TN;
-    TYPE* pa[TM, TL] = A + ra_c[:, newaxis] * stride_ca
-                         + a_delta[newaxis, :];
-    TYPE* pb[TL, TN] = B + rb_k[newaxis, :] * stride_kc
-                         + b_delta[:, newaxis];
+    TYPE* pa[TM, TL] = A;
+    TYPE* pb[TL, TN] = B;
     int L = N*P*Q;
 #else
     // load LUT header
@@ -61,9 +59,9 @@ src = '''
     int* pa_delta[TL] = lut + a_offset + 0 ... TL;
     int a_delta[TL]   = *pa_delta;
     TYPE* pa[TM, TL]  = A + rc_n[:, newaxis] * stride_na
-                         + a_delta[newaxis, :]
-                         + rc_p[:, newaxis] * stride_ha
-                         + rc_q[:, newaxis] * 1;
+                          + rc_p[:, newaxis] * stride_ha
+                          + rc_q[:, newaxis] * stride_wa
+                          + a_delta[newaxis, :];
     // initialize b pointers
     int  rb_k[TN]     = 0 ... TN;
     int  rb_c[TL]     = 0 ... TL;
@@ -123,9 +121,9 @@ src = '''
 #else
     int rc_k[TN]     = column * TN + 0 ... TN;
     TYPE* pc[TM, TN] = C + rc_n[:, newaxis] * stride_nc
-                         + rc_k[newaxis, :] * stride_kc
+                         + rc_k[newaxis, :] * 1
                          + rc_p[:, newaxis] * stride_hc
-                         + rc_q[:, newaxis] * 1;
+                         + rc_q[:, newaxis] * stride_wc;
     bool checkc[TM, TN] = rc_npq[:, newaxis] < N*P*Q;
 #endif
     // write-back directly
@@ -327,11 +325,11 @@ class _sparse_conv2d(torch.autograd.Function):
     # create semaphores
     locks = _sparse_conv2d.get_locks(2*width*num_locks*N*P*Q)
     # create output
-    c = torch.empty((N, K, P, Q), dtype=a.dtype, device=a.device)
+    c = torch.empty((N, K, P, Q), dtype=a.dtype, device=a.device).contiguous(memory_format=torch.channels_last)
     kernel(a, b, c, 
           N, P, Q, K,
-          a.stride(0), a.stride(1), a.stride(2),
-          c.stride(0), c.stride(1), c.stride(2),
+          a.stride(0), a.stride(2), a.stride(3),
+          c.stride(0), c.stride(2), c.stride(3),
           lut, locks, num_locks, 
           grid = lambda opt: [width, triton.cdiv(N*P*Q, opt.d('TM'))], 
           bench = bench)
@@ -401,8 +399,10 @@ class SparseConv2d:
     self.layout = layout
     self.block = block
     # look-up tables
-    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, 16, False, [1, W, W*H])
-    self.da_lut, self.da_num_locks, self.da_width = _sparse_conv2d.make_dds_lut(layout, block, 16, True,  [1, Q + 8, (Q + 8)*(P + 8)])
+    QQ, PP = Q + 8, P + 8
+    # assume NHWC format
+    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, 16, False, [C*W, C, 1])
+    self.da_lut, self.da_num_locks, self.da_width = _sparse_conv2d.make_dds_lut(layout, block, 16, True,  [K*QQ, K, 1])
     self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
     db_delta_a = _sparse_conv2d.make_db_delta(N, H, W, W*H*C, W, 1, 8)
     db_delta_b = _sparse_conv2d.make_db_delta(N, H, W, W*H*K, W, 1, 8)

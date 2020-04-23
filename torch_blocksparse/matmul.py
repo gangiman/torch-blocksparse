@@ -258,7 +258,7 @@ class _sparse_matmul(torch.autograd.Function):
   ##########################
   @staticmethod
   def make_sdd_lut(mask, block):
-    nnz = torch.nonzero(mask)
+    nnz = mask.nonzero()
     width = mask.sum()
     # create lut
     h = nnz[:, 0]

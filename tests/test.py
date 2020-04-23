@@ -275,9 +275,10 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   generator = torch.distributions.categorical.Categorical(probs)
   # initialize tensors
   layout = generator.sample((K//block, C//block, R, S))
-  x = torch.rand((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda()
+  x = torch.rand((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda().contiguous(memory_format=torch.channels_last)
   w = torch.ones((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
-  dy = torch.rand((N, K, H - R + 1, W - S + 1), dtype=torch.float32).cuda()
+  dy = torch.rand((N, K, H - R + 1, W - S + 1), dtype=torch.float32).cuda().contiguous(memory_format=torch.channels_last)
+  print(x.stride())
   x.retain_grad()
   w.retain_grad()
   # execute
