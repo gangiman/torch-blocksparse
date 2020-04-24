@@ -276,9 +276,8 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   # initialize tensors
   layout = generator.sample((K//block, C//block, R, S))
   x = torch.rand((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda().contiguous(memory_format=torch.channels_last)
-  w = torch.ones((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
+  w = torch.rand((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
   dy = torch.rand((N, K, H - R + 1, W - S + 1), dtype=torch.float32).cuda().contiguous(memory_format=torch.channels_last)
-  print(x.stride())
   x.retain_grad()
   w.retain_grad()
   # execute
@@ -286,12 +285,14 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   ty, tdx, tdw = run_conv2d_triton(x, w, dy, layout, block)
   print((ry - ty).abs().max())
   print((rdx - tdx).abs().max())
+  print((rdw - tdw).abs().max())
+  #print(rdw)
+  #print(tdw)
   # print(rdx[0,0,0,0], tdx[0,0,0,0])
   #print(rdx)
   #print(tdx)
   #print((ry - ty).abs().max())
   #print((rdx - tdx).abs().max())
-  #print((rdw - tdw).abs().max())
   #print(rdx)
   #print(tdx)
 

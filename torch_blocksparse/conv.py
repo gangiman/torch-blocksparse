@@ -26,20 +26,26 @@ src = '''
     int pid0 = get_program_id(0);
     int pid1 = get_program_id(1);
 #ifdef DW
-    int* header = lut + pid0 * 3;
-    int  off_ck = *(header + 1);
-    int  off_cc = *(header + 2);
+    int* header = lut + pid0 * 4;
+    int  off_ck = *(header + 0);
+    int  off_cc = *(header + 1);
+    int  off_cr = *(header + 2);
+    int  off_cs = *(header + 3);
     int lockid = 0;
     int maxid = TZ;
-    int* p_delta = lut + get_num_programs(0)*3;
+    int* p_delta = lut + get_num_programs(0)*4;
     int* pa_delta[TL] = p_delta + 0 ... TL;
     int* pb_delta[TL] = p_delta + N*P*Q + TL + 0 ... TL;
     int  a_delta[TL]  = *pa_delta;
     int  b_delta[TL]  = *pb_delta;
     int  ra_c[TM] = off_cc * TM + 0 ... TM;
     int  rb_k[TN] = off_ck * TN + 0 ... TN;
-    TYPE* pa[TM, TL] = A;
-    TYPE* pb[TL, TN] = B;
+    TYPE* pa[TM, TL] = A + ra_c[:, newaxis] * 1
+                         + off_cr * stride_ha
+                         + off_cs * stride_wa
+                         + a_delta[newaxis, :];
+    TYPE* pb[TL, TN] = B + rb_k[newaxis, :] * 1
+                         + b_delta[:, newaxis];
     int L = N*P*Q;
 #else
     // load LUT header
@@ -85,11 +91,9 @@ src = '''
       acc += a @ b;
 #ifdef DW
       pa_delta += TL;
-      pb_delta += TL;
       a_delta = *pa_delta;
-      b_delta = *pb_delta;
       pa += a_delta[newaxis, :];
-      pb += b_delta[:, newaxis];
+      pb += TL * K;
 #else
       // update pointers
       pa_delta += TL;
@@ -189,22 +193,22 @@ class _sparse_conv2d(torch.autograd.Function):
     for k in range(layout.shape[out_dim]):
         if is_dx:
           repeats = block*torch.ones(layout.shape[0], dtype=torch.int64)
-          nnz = layout[:, k, :, :].repeat_interleave(repeats, dim=0).nonzero()
-          a_coffset = nnz[:,0]*strides[2] - \
+          nnz = layout[:, k, :, :].repeat_interleave(repeats, dim=0).permute(1, 2, 0).nonzero()
+          a_coffset = nnz[:,2]*strides[0] - \
                       nnz[:,1]*strides[1] - \
-                      nnz[:,2]*strides[0]
-          a_noffset = nnz[step:,0]*strides[2] - \
+                      nnz[:,0]*strides[2]
+          a_noffset = nnz[step:,2]*strides[0] - \
                       nnz[step:,1]*strides[1] - \
-                      nnz[step:,2]*strides[0]
+                      nnz[step:,0]*strides[2]
         else:
           repeats = block*torch.ones(layout.shape[1], dtype=torch.int64)
-          nnz = layout[k, :, :, :].repeat_interleave(repeats, dim=0).nonzero()
-          a_coffset = nnz[:,0]*strides[2] + \
+          nnz = layout[k, :, :, :].repeat_interleave(repeats, dim=0).permute(1, 2, 0).nonzero()
+          a_coffset = nnz[:,2]*strides[0] + \
                       nnz[:,1]*strides[1] + \
-                      nnz[:,2]*strides[0]
-          a_noffset = nnz[step:,0]*strides[2] + \
+                      nnz[:,0]*strides[2]
+          a_noffset = nnz[step:,2]*strides[0] + \
                       nnz[step:,1]*strides[1] + \
-                      nnz[step:,2]*strides[0]
+                      nnz[step:,0]*strides[2]
         a_dd  = a_noffset - a_coffset[:-step]
         a_dd  = torch.cat((a_coffset[:step], a_dd))
         a_deltas = torch.cat((a_deltas, a_dd))
@@ -224,7 +228,18 @@ class _sparse_conv2d(torch.autograd.Function):
   
   @staticmethod
   def make_sdd_lut(layout, block):
-    return _sparse_matmul.make_sdd_lut(layout.unsqueeze(0), block)
+    nnz = layout.nonzero()
+    width = layout.sum()
+    # create lut
+    k = nnz[:, 0]
+    c = nnz[:, 1]
+    r = nnz[:, 2]
+    s = nnz[:, 3]
+    lut = torch.stack((k, c, r, s), dim=1).view(-1).contiguous()
+    lut = lut.type(torch.int32).cuda()
+    # create locks
+    num_locks = 1
+    return lut, num_locks, width
 
   @staticmethod
   def unpack(idx, N, H, W):
@@ -275,24 +290,33 @@ class _sparse_conv2d(torch.autograd.Function):
     assert a_dtype == b_dtype
     assert Na == Nb
     # create kernel
-    #defines = {'NAME': 'sdd_conv2d', 'TYPE': a.dtype,
-    #           'TM': block, 'TL': 8, 'TN': block, 'BLOCK': block,
-    #           'TZ': 1, 'DW': True}
-    #cache = _sparse_conv2d.sdd_cache
-    #kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a_dtype))
+    defines = {'NAME': 'sdd_conv2d', 'TYPE': a.dtype,
+               'TM': block, 'TL': 8, 'TN': block, 'BLOCK': block,
+               'TZ': 1, 'DW': True}
+    cache = _sparse_conv2d.sdd_cache
+    kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a_dtype))
     # create semaphores
-    #locks = _sparse_conv2d.get_locks(2*width*num_locks)
+    locks = _sparse_conv2d.get_locks(2*width*num_locks)
     # create output
     c = torch.empty((layout.sum()*block, block), dtype=a.dtype, device=a.device)
-    #kernel(a, b, c, 
-    #      Na, H, W, K,
-    #      a.stride(0), a.stride(1), a.stride(2),
-    #      b.stride(0), b.stride(1), b.stride(2),
-    #      lut, locks, num_locks, 
-    #      grid = lambda opt: [width, opt.d('TZ')], 
-    #      bench = bench)
-    # save for backward pass
+    kernel(a, b, c, 
+          Na, P, Q, K,
+          a.stride(0), a.stride(2), a.stride(3),
+          b.stride(0), b.stride(3), b.stride(3),
+          lut, locks, num_locks, 
+          grid = lambda opt: [width, opt.d('TZ')], 
+          bench = bench)
     return c
+
+  @staticmethod
+  def pad(tensor, pad):
+      pad = pad + [0] *  (2*len(tensor.shape) - len(pad))
+      begin = [ x if x > 0 else None for x in pad[-1::-2]]
+      end   = [-x if x > 0 else None for x in pad[-2::-2]]
+      slices = [slice(b, e) for b, e in zip(begin, end)]
+      tensor = torch.nn.functional.pad(tensor, pad, 'constant', 0).to(memory_format=torch.channels_last)
+      tensor = tensor[slices]
+      return tensor
 
   # Dense = Dense x Sparse
   @staticmethod
@@ -314,7 +338,7 @@ class _sparse_conv2d(torch.autograd.Function):
     assert Ca == Cb
     # pad
     if is_dx:
-      a = triton.ops._einsum.pad(a, [4, 4, 4, 4])
+      a = _sparse_conv2d.pad(a, [4, 4, 4, 4])
     # create kernel
     defines = {'NAME': 'dds_conv2d', 'TYPE': a.dtype,
                'TM': 32, 'TL': 16, 'TN': block, 'BLOCK': block,
@@ -401,11 +425,11 @@ class SparseConv2d:
     # look-up tables
     QQ, PP = Q + 8, P + 8
     # assume NHWC format
-    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, 16, False, [C*W, C, 1])
-    self.da_lut, self.da_num_locks, self.da_width = _sparse_conv2d.make_dds_lut(layout, block, 16, True,  [K*QQ, K, 1])
+    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, 16, False, [1, C, C*W])
+    self.da_lut, self.da_num_locks, self.da_width = _sparse_conv2d.make_dds_lut(layout, block, 16, True,  [1, K, K*QQ])
     self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
-    db_delta_a = _sparse_conv2d.make_db_delta(N, H, W, W*H*C, W, 1, 8)
-    db_delta_b = _sparse_conv2d.make_db_delta(N, H, W, W*H*K, W, 1, 8)
+    db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 8)
+    db_delta_b = _sparse_conv2d.make_db_delta(N, P, Q, K*Q*P, K*Q, K, 8)
     self.db_lut = torch.cat((self.db_lut, db_delta_a, db_delta_b))
     # timings
     self.bench = False
