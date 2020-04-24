@@ -223,19 +223,19 @@ def mask_weights(w, layout, block):
   repeat_k = block*torch.ones(layout.shape[0], dtype=torch.int64)
   repeat_c = block*torch.ones(layout.shape[1], dtype=torch.int64)
   mask = layout.repeat_interleave(repeat_k, dim=0)\
-                 .repeat_interleave(repeat_c, dim=1).cuda()
+               .repeat_interleave(repeat_c, dim=1).cuda()
   return w * mask
 
 def compress_weights(w, layout, block):
   blocks = torch.empty((0,), dtype=torch.float32)
-  repeat_c = block*torch.ones(layout.shape[1], dtype=torch.int64)
-  layout = layout.repeat_interleave(repeat_c, dim=1)
-  for k in range(layout.shape[0]):
-    nnz = layout[k, :, :, :].nonzero()
-    compressed = w[k*block : (k+1)*block,
-                   nnz[:,0], nnz[:,1], nnz[:, 2]].cpu()
-    for bc in range(0, compressed.shape[1], block):
-      blocks = torch.cat((blocks, compressed[:, bc:bc+block]))
+  for c in range(layout.shape[1]):
+    for k in range(layout.shape[0]):
+      nnz = layout[k, c, :, :].nonzero()
+      for r, s in nnz.tolist():
+        current = w[k*block : (k+1)*block,
+                    c*block : (c+1)*block,
+                    r, s].cpu()
+        blocks = torch.cat((blocks, current))
   return blocks.cuda()
 
 def run_conv2d_reference(x, w, dy, layout, block):
