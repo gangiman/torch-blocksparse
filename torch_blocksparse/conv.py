@@ -172,22 +172,27 @@ class _sparse_conv2d(torch.autograd.Function):
     width = 0
     div = block // step
     # pointer increments for b
-    # if is_dx:
-    #   repeats = block*torch.ones(layout.shape[0], dtype=torch.int64)
-    #   rilayout = layout.repeat_interleave(repeats, dim=0)
-    #   rilayout = rilayout.permute(0, 2, 3, 1)
-    #   rilayout = rilayout.view(-1, rilayout.shape[-1])
-    #   size = rilayout.sum()
-    #   rilayout[rilayout > 0] = 1 + torch.arange(size)
-    #   idx = rilayout.T[rilayout.T > 0] - 1
-    # else:
-    b_offset = torch.arange(layout.sum())
-    b_offset = b_offset * block * block
-    b_deltas = b_offset.clone()
-    b_deltas[1:] -= b_offset[:-1]
-    b_deltas = b_deltas.view(-1)
-    b_deltas_start = torch.zeros(layout.shape[0], dtype=torch.int64)
-    b_deltas_start[1:] = layout.view(layout.shape[0], -1).sum(1).cumsum(0)[:-1]
+    if is_dx:
+      size = layout.sum()
+      block_id = layout.permute(0, 2, 3, 1).contiguous()
+      block_id[block_id > 0] = 1 + torch.arange(size)
+      block_id = block_id.permute(0, 3, 1, 2).contiguous()
+      b_offset = block_id[block_id > 0] - 1
+      b_offset = b_offset * block * block
+      b_deltas = b_offset.clone()
+      b_deltas[1:] -= b_offset[:-1]
+      # starting position in delta table
+      b_deltas_start = torch.zeros(layout.shape[1], dtype=torch.int64)
+      b_deltas_start[1:] = layout.permute(1, 0, 2, 3).view(layout.shape[1], -1).sum(1).cumsum(0)[:-1]
+      b_deltas[b_deltas_start] = b_offset[b_deltas_start]
+    else:
+      b_offset = torch.arange(layout.sum())
+      b_offset = b_offset * block * block
+      b_deltas = b_offset.clone()
+      b_deltas[1:] -= b_offset[:-1]
+      b_deltas = b_deltas.view(-1)
+      b_deltas_start = torch.zeros(layout.shape[0], dtype=torch.int64)
+      b_deltas_start[1:] = layout.view(layout.shape[0], -1).sum(1).cumsum(0)[:-1]
     # headers and pointer increments for a
     out_dim = 1 if is_dx else 0
     for k in range(layout.shape[out_dim]):
@@ -228,13 +233,13 @@ class _sparse_conv2d(torch.autograd.Function):
   
   @staticmethod
   def make_sdd_lut(layout, block):
-    nnz = layout.nonzero()
+    nnz = layout.permute(0, 2, 3, 1).contiguous().nonzero()
     width = layout.sum()
     # create lut
     k = nnz[:, 0]
-    c = nnz[:, 1]
-    r = nnz[:, 2]
-    s = nnz[:, 3]
+    r = nnz[:, 1]
+    s = nnz[:, 2]
+    c = nnz[:, 3]
     lut = torch.stack((k, c, r, s), dim=1).view(-1).contiguous()
     lut = lut.type(torch.int32).cuda()
     # create locks

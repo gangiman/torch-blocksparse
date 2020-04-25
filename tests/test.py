@@ -228,14 +228,16 @@ def mask_weights(w, layout, block):
 
 def compress_weights(w, layout, block):
   blocks = torch.empty((0,), dtype=torch.float32)
-  for c in range(layout.shape[1]):
-    for k in range(layout.shape[0]):
-      nnz = layout[k, c, :, :].nonzero()
-      for r, s in nnz.tolist():
-        current = w[k*block : (k+1)*block,
-                    c*block : (c+1)*block,
-                    r, s].cpu()
-        blocks = torch.cat((blocks, current))
+  for k in range(layout.shape[0]):
+    for r in range(layout.shape[2]):
+      for s in range(layout.shape[3]):
+        for c in range(layout.shape[1]):
+          if layout[k, c, r, s] == 0:
+            continue
+          current = w[k*block : (k+1)*block,
+                      c*block : (c+1)*block,
+                      r, s].cpu()
+          blocks = torch.cat((blocks, current))
   return blocks.cuda()
 
 def run_conv2d_reference(x, w, dy, layout, block):
@@ -283,6 +285,7 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   # execute
   ry, rdx, rdw = run_conv2d_reference(x, w, dy, layout, block)
   ty, tdx, tdw = run_conv2d_triton(x, w, dy, layout, block)
+  #print(rdx[0,0,0,0], tdx[0,0,0,0])
   print((ry - ty).abs().max())
   print((rdx - tdx).abs().max())
   print((rdw - tdw).abs().max())
@@ -309,5 +312,5 @@ if __name__ == '__main__':
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
-  test_conv2d(8, 16, 16, 16, 16, 3, 3, 0., 16)
+  test_conv2d(8, 32, 16, 16, 16, 3, 3, 0., 16)
   pass
