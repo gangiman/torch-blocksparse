@@ -184,8 +184,11 @@ class _sparse_conv2d(torch.autograd.Function):
       b_deltas = b_offset.clone()
       b_deltas[1:] -= b_offset[:-1]
       # starting position in delta table
+      sizes = torch.zeros(layout.shape[1], dtype=torch.int64)
+      for c in range(layout.shape[1]):
+        sizes[c] = layout[:, c, :, :].sum()
       b_deltas_start = torch.zeros(layout.shape[1], dtype=torch.int64)
-      b_deltas_start[1:] = layout.permute(0, 2, 3, 1).reshape(layout.shape[1], -1).sum(1).cumsum(0)[:-1]
+      b_deltas_start[1:] = sizes.cumsum(0)[:-1]
       b_deltas[b_deltas_start] = b_offset[b_deltas_start]
     else:
       b_offset = torch.arange(layout.sum())
