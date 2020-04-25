@@ -174,16 +174,18 @@ class _sparse_conv2d(torch.autograd.Function):
     # pointer increments for b
     if is_dx:
       size = layout.sum()
-      block_id = layout.permute(0, 2, 3, 1).contiguous()
+      # blocks are stored in order KRSC
+      block_id = layout.clone().permute(0, 2, 3, 1).contiguous()
       block_id[block_id > 0] = 1 + torch.arange(size)
-      block_id = block_id.permute(0, 3, 1, 2).contiguous()
+      # blocks are traversed in order CRSK
+      block_id = block_id.permute(3, 1, 2, 0).contiguous()
       b_offset = block_id[block_id > 0] - 1
       b_offset = b_offset * block * block
       b_deltas = b_offset.clone()
       b_deltas[1:] -= b_offset[:-1]
       # starting position in delta table
       b_deltas_start = torch.zeros(layout.shape[1], dtype=torch.int64)
-      b_deltas_start[1:] = layout.permute(1, 0, 2, 3).view(layout.shape[1], -1).sum(1).cumsum(0)[:-1]
+      b_deltas_start[1:] = layout.permute(0, 2, 3, 1).reshape(layout.shape[1], -1).sum(1).cumsum(0)[:-1]
       b_deltas[b_deltas_start] = b_offset[b_deltas_start]
     else:
       b_offset = torch.arange(layout.sum())
@@ -193,6 +195,7 @@ class _sparse_conv2d(torch.autograd.Function):
       b_deltas = b_deltas.view(-1)
       b_deltas_start = torch.zeros(layout.shape[0], dtype=torch.int64)
       b_deltas_start[1:] = layout.view(layout.shape[0], -1).sum(1).cumsum(0)[:-1]
+      b_deltas[b_deltas_start] = b_offset[b_deltas_start]
     # headers and pointer increments for a
     out_dim = 1 if is_dx else 0
     for k in range(layout.shape[out_dim]):
