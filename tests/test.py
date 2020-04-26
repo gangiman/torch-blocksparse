@@ -278,7 +278,7 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   # initialize tensors
   layout = generator.sample((K//block, C//block, R, S))
   x = torch.rand((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda().contiguous(memory_format=torch.channels_last)
-  w = torch.rand((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
+  w = torch.ones((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
   dy = torch.rand((N, K, H - R + 1, W - S + 1), dtype=torch.float32).cuda().contiguous(memory_format=torch.channels_last)
   x.retain_grad()
   w.retain_grad()
@@ -302,5 +302,5 @@ if __name__ == '__main__':
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
-  test_conv2d(8, 32, 16, 16, 32, 3, 3, 0.5, 16)
+  test_conv2d(1, 32, 64, 64, 32, 3, 3, 0., 16)
   pass

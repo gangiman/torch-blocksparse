@@ -62,17 +62,18 @@ src = '''
     int rc_q  [TM]    = rc_npq  % Q;
     int rc_p  [TM]    = rc_np   % P;
     int rc_n  [TM]    = rc_np   / P;
-    int* pa_delta[TL] = lut + a_offset + 0 ... TL;
-    int a_delta[TL]   = *pa_delta;
-    TYPE* pa[TM, TL]  = A + rc_n[:, newaxis] * stride_na
-                          + rc_p[:, newaxis] * stride_ha
-                          + rc_q[:, newaxis] * stride_wa
-                          + a_delta[newaxis, :];
+    int* pa_delta = lut + a_offset;
+    int a_delta  __multipleof(TL) = *pa_delta;
+    int ra_c  [TL]    = 0 ... TL;
+    TYPE* pa[TM, TL]  = A + a_delta + rc_n[:, newaxis] * stride_na
+                                    + rc_p[:, newaxis] * stride_ha
+                                    + rc_q[:, newaxis] * stride_wa
+                                    + ra_c[newaxis, :] * 1;
     // initialize b pointers
     int  rb_k[TN]     = 0 ... TN;
     int  rb_c[TL]     = 0 ... TL;
     int* pb_delta     = lut + b_offset;
-    int  b_delta      = *pb_delta;
+    int  b_delta __multipleof(TL) = *pb_delta;
     TYPE* pb[TL, TN]  = B + b_delta + rb_k[newaxis, :] * STRIDE_BK
                                     + rb_c[:, newaxis] * STRIDE_BC;
 #endif
@@ -96,11 +97,11 @@ src = '''
       pb += TL * K;
 #else
       // update pointers
-      pa_delta += TL;
+      pa_delta += 1;
       pb_delta += 1;
       a_delta = *pa_delta;
       b_delta = *pb_delta;
-      pa += a_delta[newaxis, :];
+      pa += a_delta;
       pb += b_delta;
 #endif
       // pre-fetch
@@ -203,29 +204,27 @@ class _sparse_conv2d(torch.autograd.Function):
     out_dim = 1 if is_dx else 0
     for k in range(layout.shape[out_dim]):
         if is_dx:
-          repeats = block*torch.ones(layout.shape[0], dtype=torch.int64)
-          nnz = layout[:, k, :, :].repeat_interleave(repeats, dim=0).permute(1, 2, 0).nonzero()
-          a_coffset = nnz[:,2]*strides[0] - \
+          nnz = layout[:, k, :, :].permute(1, 2, 0).nonzero()
+          a_coffset = nnz[:,2]*block*strides[0] - \
                       nnz[:,1]*strides[1] - \
                       nnz[:,0]*strides[2]
-          a_noffset = nnz[step:,2]*strides[0] - \
-                      nnz[step:,1]*strides[1] - \
-                      nnz[step:,0]*strides[2]
+          a_noffset = nnz[1:,2]*block*strides[0] - \
+                      nnz[1:,1]*strides[1] - \
+                      nnz[1:,0]*strides[2]
         else:
-          repeats = block*torch.ones(layout.shape[1], dtype=torch.int64)
-          nnz = layout[k, :, :, :].repeat_interleave(repeats, dim=0).permute(1, 2, 0).nonzero()
-          a_coffset = nnz[:,2]*strides[0] + \
+          nnz = layout[k, :, :, :].permute(1, 2, 0).nonzero()
+          a_coffset = nnz[:,2]*block*strides[0] + \
                       nnz[:,1]*strides[1] + \
                       nnz[:,0]*strides[2]
-          a_noffset = nnz[step:,2]*strides[0] + \
-                      nnz[step:,1]*strides[1] + \
-                      nnz[step:,0]*strides[2]
-        a_dd  = a_noffset - a_coffset[:-step]
-        a_dd  = torch.cat((a_coffset[:step], a_dd))
+          a_noffset = nnz[1:,2]*block*strides[0] + \
+                      nnz[1:,1]*strides[1] + \
+                      nnz[1:,0]*strides[2]
+        a_dd  = a_noffset - a_coffset[:-1]
+        a_dd  = torch.cat((a_coffset[:1], a_dd))
         a_deltas = torch.cat((a_deltas, a_dd))
         # create headers
         size = a_dd.shape[0]
-        hh = torch.tensor([a_deltas_start, b_deltas_start[k], size, k], dtype=torch.int64)
+        hh = torch.tensor([a_deltas_start, b_deltas_start[k], size*block, k], dtype=torch.int64)
         a_deltas_start += size
         headers = torch.cat((headers, hh))
         # update width
@@ -352,7 +351,7 @@ class _sparse_conv2d(torch.autograd.Function):
       a = _sparse_conv2d.pad(a, [4, 4, 4, 4])
     # create kernel
     defines = {'NAME': 'dds_conv2d', 'TYPE': a.dtype,
-               'TM': 32, 'TL': 16, 'TN': block, 'BLOCK': block,
+               'TM': 128, 'TL': 16, 'TN': block, 'BLOCK': block,
                'STRIDE_BK': 1 if is_dx else block,
                'STRIDE_BC': block if is_dx else 1}
     cache = _sparse_conv2d.dds_cache
