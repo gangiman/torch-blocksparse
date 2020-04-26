@@ -8,7 +8,7 @@ src = '''
                         TYPE* B __readonly  __noalias __aligned(16),
                         TYPE* C __noalias __aligned(16),
                         // shapes
-                        int N, int P, int Q, int K,
+                        int N, int P, int Q, int K __multipleof(8),
                         // a strides
                         int stride_na __multipleof(8),
                         int stride_ha __multipleof(8),
@@ -99,10 +99,8 @@ src = '''
       // update pointers
       pa_delta += 1;
       pb_delta += 1;
-      a_delta = *pa_delta;
-      b_delta = *pb_delta;
-      pa += a_delta;
-      pb += b_delta;
+      pa += *pa_delta;
+      pb += *pb_delta;
 #endif
       // pre-fetch
       bool checka[TM, TL] = l > TL;
@@ -126,9 +124,9 @@ src = '''
 #else
     int rc_k[TN]     = column * TN + 0 ... TN;
     TYPE* pc[TM, TN] = C + rc_n[:, newaxis] * stride_nc
-                         + rc_k[newaxis, :] * 1
                          + rc_p[:, newaxis] * stride_hc
-                         + rc_q[:, newaxis] * stride_wc;
+                         + rc_q[:, newaxis] * stride_wc
+                         + rc_k[newaxis, :] * 1;
     bool checkc[TM, TN] = rc_npq[:, newaxis] < N*P*Q;
 #endif
     // write-back directly
@@ -365,7 +363,7 @@ class _sparse_conv2d(torch.autograd.Function):
           a.stride(0), a.stride(2), a.stride(3),
           c.stride(0), c.stride(2), c.stride(3),
           lut, locks, num_locks, 
-          grid = lambda opt: [width, triton.cdiv(N*P*Q, opt.d('TM'))], 
+          grid = lambda opt: [triton.cdiv(N*P*Q, opt.d('TM'), width)], 
           bench = bench)
     return c
 

@@ -227,7 +227,7 @@ def mask_weights(w, layout, block):
   return w * mask
 
 def compress_weights(w, layout, block):
-  blocks = torch.empty((0,), dtype=torch.float32)
+  blocks = torch.empty((0), dtype=w.dtype)
   for k in range(layout.shape[0]):
     for r in range(layout.shape[2]):
       for s in range(layout.shape[3]):
@@ -243,10 +243,11 @@ def compress_weights(w, layout, block):
 def run_conv2d_reference(x, w, dy, layout, block):
   # create conv2d
   C, K, R, S = x.shape[1], dy.shape[1], layout.shape[2], layout.shape[3]
-  conv2d = torch.nn.Conv2d(w.shape[1], w.shape[0], (R, S), bias=False).cuda()
+  conv2d = torch.nn.Conv2d(w.shape[1], w.shape[0], (R, S), bias=False).cuda().type(w.dtype)
   conv2d.weight.data.copy_(mask_weights(w, layout, block))
   # run conv2d
   y = conv2d(x)
+  return y, None, None
   # backward
   y.backward(dy)
   dx = x.grad.clone()
@@ -264,6 +265,7 @@ def run_conv2d_triton(x, w, dy, layout, block):
   w = compress_weights(w, layout, block)
   w.retain_grad()
   y = sparse_conv2d(x, w)
+  return y, None, None
   # backward
   y.backward(dy)
   dx = x.grad.clone()
@@ -277,17 +279,18 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   generator = torch.distributions.categorical.Categorical(probs)
   # initialize tensors
   layout = generator.sample((K//block, C//block, R, S))
-  x = torch.rand((N, C, H, W), dtype=torch.float32, requires_grad=True).cuda().contiguous(memory_format=torch.channels_last)
-  w = torch.ones((K, C, R, S), dtype=torch.float32, requires_grad=True).cuda()
-  dy = torch.rand((N, K, H - R + 1, W - S + 1), dtype=torch.float32).cuda().contiguous(memory_format=torch.channels_last)
+  dtype = torch.float32
+  x = torch.rand((N, C, H, W), requires_grad=True).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
+  w = torch.rand((K, C, R, S), requires_grad=True).cuda().type(dtype)
+  dy = torch.rand((N, K, H - R + 1, W - S + 1)).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
   x.retain_grad()
   w.retain_grad()
   # execute
   ry, rdx, rdw = run_conv2d_reference(x, w, dy, layout, block)
   ty, tdx, tdw = run_conv2d_triton(x, w, dy, layout, block)
   print((ry - ty).abs().max())
-  print((rdx - tdx).abs().max())
-  print((rdw - tdw).abs().max())
+  #print((rdx - tdx).abs().max())
+  #print((rdw - tdw).abs().max())
 
 #############
 # Run tests #
@@ -302,5 +305,5 @@ if __name__ == '__main__':
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
-  test_conv2d(1, 32, 64, 64, 32, 3, 3, 0., 16)
+  test_conv2d(8, 32, 25, 25, 32, 3, 3, 0., 16)
   pass
