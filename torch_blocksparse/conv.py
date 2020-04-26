@@ -151,6 +151,8 @@ src = '''
 
 class _sparse_conv2d(torch.autograd.Function):
 
+  _step = 8
+
   ##########################
   # UTILITIES              #
   ##########################
@@ -198,6 +200,17 @@ class _sparse_conv2d(torch.autograd.Function):
       b_deltas_start = torch.zeros(layout.shape[0], dtype=torch.int64)
       b_deltas_start[1:] = layout.view(layout.shape[0], -1).sum(1).cumsum(0)[:-1]
       b_deltas[b_deltas_start] = b_offset[b_deltas_start]
+    # handle step
+    b_deltas = b_deltas.view(-1, 1).repeat(1, div)
+    if not is_dx:
+      b_deltas[:, 1:] = step
+      b_deltas[:, 0] -= (div-1)*step
+    else:
+      b_deltas[:, 1:] = step*block
+      b_deltas[:, 0] -= (div - 1)*step*block
+    b_deltas[b_deltas_start, 0] = b_offset[b_deltas_start]
+    b_deltas = b_deltas.view(-1)
+    b_deltas_start *= div
     # headers and pointer increments for a
     out_dim = 1 if is_dx else 0
     for k in range(layout.shape[out_dim]):
@@ -219,10 +232,17 @@ class _sparse_conv2d(torch.autograd.Function):
                       nnz[1:,0]*strides[2]
         a_dd  = a_noffset - a_coffset[:-1]
         a_dd  = torch.cat((a_coffset[:1], a_dd))
+        # handle step
+        offset = a_dd[0]
+        a_dd = a_dd.view(-1, 1).repeat(1, div)
+        a_dd[:, 1:] = step
+        a_dd[:, 0] -= (div - 1)*step
+        a_dd = a_dd.view(-1)
+        a_dd[0] = offset
         a_deltas = torch.cat((a_deltas, a_dd))
         # create headers
         size = a_dd.shape[0]
-        hh = torch.tensor([a_deltas_start, b_deltas_start[k], size*block, k], dtype=torch.int64)
+        hh = torch.tensor([a_deltas_start, b_deltas_start[k], size*step, k], dtype=torch.int64)
         a_deltas_start += size
         headers = torch.cat((headers, hh))
         # update width
@@ -306,7 +326,7 @@ class _sparse_conv2d(torch.autograd.Function):
     # create semaphores
     locks = _sparse_conv2d.get_locks(2*width*num_locks)
     # create output
-    c = torch.empty((layout.sum()*block, block), dtype=a.dtype, device=a.device)
+    c = torch.empty((layout.sum(), block, block), dtype=a.dtype, device=a.device)
     kernel(a, b, c, 
           Na, P, Q, K,
           a.stride(0), a.stride(2), a.stride(3),
@@ -349,7 +369,7 @@ class _sparse_conv2d(torch.autograd.Function):
       a = _sparse_conv2d.pad(a, [4, 4, 4, 4])
     # create kernel
     defines = {'NAME': 'dds_conv2d', 'TYPE': a.dtype,
-               'TM': 128, 'TL': 16, 'TN': block, 'BLOCK': block,
+               'TM': 128, 'TL': _sparse_conv2d._step, 'TN': block, 'BLOCK': block,
                'STRIDE_BK': 1 if is_dx else block,
                'STRIDE_BC': block if is_dx else 1}
     cache = _sparse_conv2d.dds_cache
@@ -363,7 +383,7 @@ class _sparse_conv2d(torch.autograd.Function):
           a.stride(0), a.stride(2), a.stride(3),
           c.stride(0), c.stride(2), c.stride(3),
           lut, locks, num_locks, 
-          grid = lambda opt: [triton.cdiv(N*P*Q, opt.d('TM'), width)], 
+          grid = lambda opt: [width, triton.cdiv(N*P*Q, opt.d('TM'))], 
           bench = bench)
     return c
 
@@ -433,8 +453,8 @@ class SparseConv2d:
     # look-up tables
     QQ, PP = Q + 8, P + 8
     # assume NHWC format
-    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, 16, False, [1, C, C*W])
-    self.da_lut, self.da_num_locks, self.da_width = _sparse_conv2d.make_dds_lut(layout, block, 16, True,  [1, K, K*QQ])
+    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, _sparse_conv2d._step, False, [1, C, C*W])
+    self.da_lut, self.da_num_locks, self.da_width = _sparse_conv2d.make_dds_lut(layout, block, _sparse_conv2d._step, True,  [1, K, K*QQ])
     self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
     db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 8)
     db_delta_b = _sparse_conv2d.make_db_delta(N, P, Q, K*Q*P, K*Q, K, 8)
