@@ -1,6 +1,7 @@
 from torch_blocksparse import *
 import torch
 torch.manual_seed(0)
+#torch.backends.cudnn.benchmark = True
 
 ############
 ## UTILS  ##
@@ -248,7 +249,7 @@ def run_conv2d_reference(x, w, dy, layout, block):
   conv2d.weight.data.copy_(mask_weights(w, layout, block))
   # run conv2d
   y = conv2d(x)
-  #return y, None, None
+  return y, None, None
   # backward
   y.backward(dy)
   dx = x.grad.clone()
@@ -266,7 +267,7 @@ def run_conv2d_triton(x, w, dy, layout, block):
   w = compress_weights(w, layout, block)
   w.retain_grad()
   y = sparse_conv2d(x, w)
-  #return y, None, None
+  return y, None, None
   # backward
   y.backward(dy)
   dx = x.grad.clone()
@@ -280,7 +281,7 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   generator = torch.distributions.categorical.Categorical(probs)
   # initialize tensors
   layout = generator.sample((K//block, C//block, R, S))
-  dtype = torch.float32
+  dtype = torch.float16
   x = torch.rand((N, C, H, W), requires_grad=True).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
   w = torch.rand((K, C, R, S), requires_grad=True).cuda().type(dtype)
   dy = torch.rand((N, K, H - R + 1, W - S + 1)).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
@@ -290,8 +291,8 @@ def test_conv2d(N, C, H, W, K, R, S, rho, block):
   ry, rdx, rdw = run_conv2d_reference(x, w, dy, layout, block)
   ty, tdx, tdw = run_conv2d_triton(x, w, dy, layout, block)
   print((ry - ty).abs().max())
-  print((rdx - tdx).abs().max())
-  print((rdw - tdw).abs().max())
+  #print((rdx - tdx).abs().max())
+  #print((rdw - tdw).abs().max())
 
 #############
 # Run tests #
@@ -306,5 +307,5 @@ if __name__ == '__main__':
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
-  test_conv2d(8, 512, 15, 15, 512, 3, 3, 0., 16)
+  test_conv2d(32, 512, 15, 15, 512, 3, 3, 0., 32)
   pass

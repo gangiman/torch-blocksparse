@@ -8,15 +8,15 @@ src = '''
                         TYPE* B __readonly  __noalias __aligned(16),
                         TYPE* C __noalias __aligned(16),
                         // shapes
-                        int N, int P, int Q, int K __multipleof(8),
+                        int N, int P, int Q, int K __multipleof(BLOCK),
                         // a strides
-                        int stride_na __multipleof(8),
-                        int stride_ha __multipleof(8),
-                        int stride_wa __multipleof(8),
+                        int stride_na __multipleof(BLOCK),
+                        int stride_ha __multipleof(BLOCK),
+                        int stride_wa __multipleof(BLOCK),
                         // c strides
-                        int stride_nc __multipleof(8),
-                        int stride_hc __multipleof(8),
-                        int stride_wc __multipleof(8),
+                        int stride_nc __multipleof(BLOCK),
+                        int stride_hc __multipleof(BLOCK),
+                        int stride_wc __multipleof(BLOCK),
                         // lut and locks
                         int* lut, int* locks, int nlocks) {
      /* ---------------- */
@@ -65,10 +65,11 @@ src = '''
     int* pa_delta = lut + a_offset;
     int a_delta  __multipleof(TL) = *pa_delta;
     int ra_c  [TL]    = 0 ... TL;
-    TYPE* pa[TM, TL]  = A + a_delta + rc_n[:, newaxis] * stride_na
-                                    + rc_p[:, newaxis] * stride_ha
-                                    + rc_q[:, newaxis] * stride_wa
-                                    + ra_c[newaxis, :] * 1;
+    int offa[TM, TL]  = a_delta + rc_n[:, newaxis] * stride_na
+                                + rc_p[:, newaxis] * stride_ha
+                                + rc_q[:, newaxis] * stride_wa
+                                + ra_c[newaxis, :] * 1;
+    TYPE* pa[TM, TL]  = A + offa;
     // initialize b pointers
     int  rb_k[TN]     = 0 ... TN;
     int  rb_c[TL]     = 0 ... TL;
@@ -99,8 +100,10 @@ src = '''
       // update pointers
       pa_delta += 1;
       pb_delta += 1;
-      pa += *pa_delta;
-      pb += *pb_delta;
+      int a_delta __multipleof(TL) = *pa_delta;
+      int b_delta __multipleof(TL) = *pb_delta;
+      pa += a_delta;
+      pb += b_delta;
 #endif
       // pre-fetch
       bool checka[TM, TL] = l > TL;
@@ -123,10 +126,11 @@ src = '''
     bool checkc[TM, TN] = 1;
 #else
     int rc_k[TN]     = column * TN + 0 ... TN;
-    TYPE* pc[TM, TN] = C + rc_n[:, newaxis] * stride_nc
+    int offc[TM, TN] = rc_n[:, newaxis] * stride_nc
                          + rc_p[:, newaxis] * stride_hc
                          + rc_q[:, newaxis] * stride_wc
                          + rc_k[newaxis, :] * 1;
+    TYPE* pc[TM, TN] = C + offc;
     bool checkc[TM, TN] = rc_npq[:, newaxis] < N*P*Q;
 #endif
     // write-back directly
@@ -151,7 +155,7 @@ src = '''
 
 class _sparse_conv2d(torch.autograd.Function):
 
-  _step = 8
+  _step = 32
 
   ##########################
   # UTILITIES              #
@@ -373,7 +377,7 @@ class _sparse_conv2d(torch.autograd.Function):
                'STRIDE_BK': 1 if is_dx else block,
                'STRIDE_BC': block if is_dx else 1}
     cache = _sparse_conv2d.dds_cache
-    kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a.dtype, is_dx))
+    kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a.dtype, is_dx), num_warps=[4])
     # create semaphores
     locks = _sparse_conv2d.get_locks(2*width*num_locks*N*P*Q)
     # create output
