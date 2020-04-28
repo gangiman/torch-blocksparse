@@ -533,7 +533,7 @@ class SparseConv2d:
         
     # look-up tables for weight gradients
     self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
-    db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 16)
+    db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W*stride_h, C*stride_w, 16)
     db_delta_b = _sparse_conv2d.make_db_delta(N, P, Q, K*Q*P, K*Q, K, 16)
     self.db_lut = torch.cat((self.db_lut, db_delta_a, db_delta_b))
 
