@@ -9,6 +9,8 @@ src = '''
                         TYPE* C __noalias __aligned(16),
                         // shapes
                         int N, int P, int Q, int K __multipleof(BLOCK),
+                        int pad_h, int pad_w,
+                        int stride_h, int stride_w,
                         // a strides
                         int stride_na __multipleof(BLOCK),
                         int stride_ha __multipleof(BLOCK),
@@ -64,10 +66,13 @@ src = '''
     int rc_n  [TM]    = rc_np   / P;
     int* pa_delta = lut + a_offset;
     int a_delta  __multipleof(TL) = *pa_delta;
+    int ra_n  [TM]    = rc_n;
+    int ra_h  [TM]    = rc_p * stride_h - pad_h;
+    int ra_w  [TM]    = rc_q * stride_w - pad_w;
     int ra_c  [TL]    = 0 ... TL;
-    int offa[TM, TL]  = a_delta + rc_n[:, newaxis] * stride_na
-                                + rc_p[:, newaxis] * stride_ha
-                                + rc_q[:, newaxis] * stride_wa
+    int offa[TM, TL]  = a_delta + ra_n[:, newaxis] * stride_na
+                                + ra_h[:, newaxis] * stride_ha
+                                + ra_w[:, newaxis] * stride_wa
                                 + ra_c[newaxis, :] * 1;
     TYPE* pa[TM, TL]  = A + offa;
     // initialize b pointers
@@ -96,6 +101,7 @@ src = '''
       a_delta = *pa_delta;
       pa += a_delta[newaxis, :];
       pb += TL * K;
+      
 #else
       // update pointers
       pa_delta += 1;
@@ -155,7 +161,7 @@ src = '''
 
 class _sparse_conv2d(torch.autograd.Function):
 
-  _step = 32
+  _step = 16
 
   ##########################
   # UTILITIES              #
@@ -311,7 +317,7 @@ class _sparse_conv2d(torch.autograd.Function):
 
   # Sparse = Dense x Dense
   @staticmethod
-  def _sdd_conv2d(a, b,
+  def _sdd_conv2d(a, b, pad_h, pad_w, stride_h, stride_w,
                   layout, block, lut, num_locks, width, 
                   bench, time):
     # sanity checks
@@ -323,16 +329,17 @@ class _sparse_conv2d(torch.autograd.Function):
     assert Na == Nb
     # create kernel
     defines = {'NAME': 'sdd_conv2d', 'TYPE': a.dtype,
-               'TM': block, 'TL': 8, 'TN': block, 'BLOCK': block,
+               'TM': block, 'TL': 16, 'TN': block, 'BLOCK': block,
                'TZ': 1, 'DW': True}
     cache = _sparse_conv2d.sdd_cache
-    kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a_dtype))
+    kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a_dtype), num_warps=[2])
     # create semaphores
     locks = _sparse_conv2d.get_locks(2*width*num_locks)
     # create output
     c = torch.empty((layout.sum(), block, block), dtype=a.dtype, device=a.device)
     kernel(a, b, c, 
           Na, P, Q, K,
+          pad_h, pad_w, stride_h, stride_w,
           a.stride(0), a.stride(2), a.stride(3),
           b.stride(0), b.stride(3), b.stride(3),
           lut, locks, num_locks, 
@@ -352,8 +359,9 @@ class _sparse_conv2d(torch.autograd.Function):
 
   # Dense = Dense x Sparse
   @staticmethod
-  def _dds_conv2d(a, b, is_dx, layout, block, 
-                  lut, num_locks, width,
+  def _dds_conv2d(a, b, pad_h, pad_w, stride_h, stride_w,
+                  is_dx, layout, block, 
+                  lut, num_locks, width, da_offs,
                   bench, time):
     # sanity checks
     N, Ca, H, W = a.shape
@@ -361,87 +369,129 @@ class _sparse_conv2d(torch.autograd.Function):
                   layout.shape[2], layout.shape[3]
     if is_dx:
       Cb, K = K, Cb
-      P = H + R - 1
-      Q = W + S - 1
+      P = 16
+      Q = 16
     else:
-      P = H - R + 1
-      Q = W - S + 1
+      P = (H + 2*pad_h - R)//stride_h + 1
+      Q = (W + 2*pad_w - S)//stride_w + 1
     assert a.dtype == b.dtype
     assert Ca == Cb
-    # pad
-    if is_dx:
-      a = _sparse_conv2d.pad(a, [4, 4, 4, 4])
     # create kernel
-    defines = {'NAME': 'dds_conv2d', 'TYPE': a.dtype,
+    defines = {'NAME': 'dds_conv2d_' + ('_dx' if is_dx else '_y'), 'TYPE': a.dtype,
                'TM': 128, 'TL': _sparse_conv2d._step, 'TN': block, 'BLOCK': block,
                'STRIDE_BK': 1 if is_dx else block,
                'STRIDE_BC': block if is_dx else 1}
     cache = _sparse_conv2d.dds_cache
     kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a.dtype, is_dx), num_warps=[4])
-    # create semaphores
-    locks = _sparse_conv2d.get_locks(2*width*num_locks*N*P*Q)
     # create output
     c = torch.empty((N, K, P, Q), dtype=a.dtype, device=a.device).contiguous(memory_format=torch.channels_last)
-    kernel(a, b, c, 
-          N, P, Q, K,
-          a.stride(0), a.stride(2), a.stride(3),
-          c.stride(0), c.stride(2), c.stride(3),
-          lut, locks, num_locks, 
-          grid = lambda opt: [width, triton.cdiv(N*P*Q, opt.d('TM'))], 
-          bench = bench)
+    if is_dx:
+      a = _sparse_conv2d.pad(a, [4, 4, 4, 4])
+      for da_lut, da_num_locks, da_width, (off_ah, off_aw, off_bh, off_bw, off_ch, off_cw) in zip(lut, num_locks, width, da_offs):
+        if lut is None:
+          c[:, :, offh::stride_h, offw::stride_w] = 0
+        else:
+          da_locks = _sparse_conv2d.get_locks(2*da_width*da_num_locks*N*P*Q)
+          aa = a[:, :, off_ah::stride_h, off_aw::stride_w]
+          cc = c[:, :, off_ch::stride_h, off_cw::stride_w]
+          N, K, P, Q = cc.shape
+          kernel(aa, b, cc,
+                N, P, Q, K,
+                pad_h, pad_w, 
+                stride_h, stride_w,
+                aa.stride(0), aa.stride(2), aa.stride(3),
+                cc.stride(0), cc.stride(2), cc.stride(3),
+                da_lut, da_locks, da_num_locks, 
+                grid = lambda opt: [da_width, triton.cdiv(N*P*Q, opt.d('TM'))], 
+                bench = bench)
+    else:
+      if pad_w > 0 and pad_h > 0 :
+        a = _sparse_conv2d.pad(a, [pad_w, pad_w, pad_h, pad_h])
+      locks = _sparse_conv2d.get_locks(2*width*num_locks*N*P*Q)
+      kernel(a, b, c, 
+            N, P, Q, K,
+            pad_h, pad_w, stride_h, stride_w,
+            a.stride(0), a.stride(2), a.stride(3),
+            c.stride(0), c.stride(2), c.stride(3),
+            lut, locks, num_locks, 
+            grid = lambda opt: [width, triton.cdiv(N*P*Q, opt.d('TM'))], 
+            bench = bench)
+
     return c
 
   
   @staticmethod
-  def forward(ctx, a, b, layout, block,
+  def forward(ctx, a, b, pad_h, pad_w, stride_h, stride_w, 
+              layout, block,
               c_lut,  c_num_locks,  c_width,
-              da_lut, da_num_locks, da_width,
+              da_lut, da_num_locks, da_width, da_offs,
               db_lut, db_num_locks, db_width,
               bench, c_time, da_time, db_time):
-    c = _sparse_conv2d._dds_conv2d(a, b, False, layout, block, 
-                                   c_lut, c_num_locks, c_width, 
+    c = _sparse_conv2d._dds_conv2d(a, b, pad_h, pad_w, stride_h, stride_w,
+                                   False, layout, block, 
+                                   c_lut, c_num_locks, c_width, None,
                                    bench, c_time)
     # save for backward
-    ctx.save_for_backward(a, da_lut, b, db_lut)
+    ctx.save_for_backward(a, b)
+    # da parameters
+    ctx.da_lut = da_lut
     ctx.da_num_locks = da_num_locks
     ctx.da_width = da_width
     ctx.da_time = da_time
+    # db parameters
+    ctx.db_lut = db_lut
     ctx.db_num_locks = db_num_locks
     ctx.db_width = db_width
     ctx.db_time = db_time
+    # conv parameters
     ctx.bench = bench
     ctx.block = block
     ctx.layout = layout
+    ctx.pad_h = pad_h
+    ctx.pad_w = pad_w
+    ctx.stride_h = stride_h
+    ctx.stride_w = stride_w
+    ctx.da_offs = da_offs
     return c
   
   @staticmethod
   def backward(ctx, dc):
     # retrieve from context
-    a, da_lut, b, db_lut = ctx.saved_tensors
+    a, b         = ctx.saved_tensors
+    da_lut       = ctx.da_lut
     da_num_locks = ctx.da_num_locks 
     da_width     = ctx.da_width 
     da_time      = ctx.da_time
+    da_offs      = ctx.da_offs
+    db_lut       = ctx.db_lut
     db_num_locks = ctx.db_num_locks
     db_width     = ctx.db_width
     db_time      = ctx.db_time
     bench        = ctx.bench
     block        = ctx.block
     layout       = ctx.layout
+    pad_h        = ctx.pad_h
+    pad_w        = ctx.pad_w
+    stride_h     = ctx.stride_h
+    stride_w     = ctx.stride_w
     # gradients w.r.t. a
     da = None
     if ctx.needs_input_grad[0]:
-      da = _sparse_conv2d._dds_conv2d(dc, b, True, layout, block, 
-                       da_lut, da_num_locks, da_width, 
+      da = _sparse_conv2d._dds_conv2d(dc, b, pad_h, pad_w, stride_h, stride_w,
+                       True, layout, block, 
+                       da_lut, da_num_locks, da_width, da_offs,
                        bench, da_time)
     # gradients w.r.t. b
     db = None
     if ctx.needs_input_grad[1]:
-      db = _sparse_conv2d._sdd_conv2d(a, dc, layout, block,
+      db = _sparse_conv2d._sdd_conv2d(a, dc, pad_h, pad_w, stride_h, stride_w,
+                                      layout, block,
                                       db_lut, db_num_locks, db_width,
                                       bench, db_time)
     return da, db, None, None,\
+           None, None, None, None,\
            None, None, None,\
-           None, None, None,\
+           None, None, None, None,\
            None, None, None,\
            None, None, None, None
 
@@ -450,29 +500,52 @@ class SparseConv2d:
 
   sparse_conv2d = _sparse_conv2d.apply
 
-  def __init__(self, layout, block, N, C, H, W, P, Q, K):
+  def __init__(self, layout, block, N, C, H, W, P, Q, K, R, S, stride_h, stride_w, pad_h, pad_w):
     # attributes
     self.layout = layout
     self.block = block
-    # look-up tables
-    QQ, PP = Q + 8, P + 8
-    # assume NHWC format
+
+    # Look-up tables for forward pass
     self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, _sparse_conv2d._step, False, [1, C, C*W])
-    self.da_lut, self.da_num_locks, self.da_width = _sparse_conv2d.make_dds_lut(layout, block, _sparse_conv2d._step, True,  [1, K, K*QQ])
+    # Look-up tables for data gradient
+    # have to be careful here
+    # the gradient of strided conv is a conv over a sparse image
+    # which can be decomposed as a set of smaller convs
+    self.da_lut, self.da_num_locks, self.da_width = [], [], []
+    self.da_offs = []
+    QQ, PP = Q + 8, P + 8
+    for off_bh in range(stride_h):
+      for off_bw in range(stride_w):
+        off_ah = int((pad_h + (1 - stride_h)*off_bh)/stride_h)
+        off_aw = int((pad_w + (1 - stride_w)*off_bw)/stride_w)
+        off_ch = (off_bh + pad_h) % stride_h
+        off_cw = (off_bw + pad_w) % stride_w
+        if off_bh >= R or off_bw >= S:
+          da_lut, da_num_locks, da_width = None
+        else:
+          curr_layout = layout[:, :, off_bh::stride_h, off_bw::stride_w]
+          da_lut, da_num_locks, da_width = _sparse_conv2d.make_dds_lut(curr_layout, block, _sparse_conv2d._step, True, [1, K, K*QQ])
+        self.da_lut.append(da_lut)
+        self.da_num_locks.append(da_num_locks)
+        self.da_width.append(da_width)
+        self.da_offs.append((off_ah, off_aw, off_bh, off_bw, off_ch, off_cw))
+    # look-up tables for weight gradients
     self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
-    db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 8)
-    db_delta_b = _sparse_conv2d.make_db_delta(N, P, Q, K*Q*P, K*Q, K, 8)
+    db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 16)
+    db_delta_b = _sparse_conv2d.make_db_delta(N, P, Q, K*Q*P, K*Q, K, 16)
     self.db_lut = torch.cat((self.db_lut, db_delta_a, db_delta_b))
+
     # timings
     self.bench = False
     self.c_time = [None]
     self.da_time = [None]
     self.db_time = [None]
 
-  def __call__(self, a, b):
-    c = SparseConv2d.sparse_conv2d(a, b, self.layout, self.block,
+  def __call__(self, a, b, pad_h, pad_w, stride_h, stride_w):
+    c = SparseConv2d.sparse_conv2d(a, b, pad_h, pad_w, stride_h, stride_w,
+                                  self.layout, self.block,
                                   self.c_lut, self.c_num_locks, self.c_width,
-                                  self.da_lut, self.da_num_locks, self.da_width,
+                                  self.da_lut, self.da_num_locks, self.da_width, self.da_offs,
                                   self.db_lut, self.db_num_locks, self.db_width,
                                   self.bench, self.c_time, self.da_time, self.db_time)
     return c

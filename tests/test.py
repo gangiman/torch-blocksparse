@@ -242,14 +242,13 @@ def compress_weights(w, layout, block):
           current += 1
   return blocks
 
-def run_conv2d_reference(x, w, dy, layout, block):
+def run_conv2d_reference(x, w, dy, pad, stride, layout, block):
   # create conv2d
   C, K, R, S = x.shape[1], dy.shape[1], layout.shape[2], layout.shape[3]
-  conv2d = torch.nn.Conv2d(w.shape[1], w.shape[0], (R, S), bias=False).cuda().type(w.dtype)
+  conv2d = torch.nn.Conv2d(w.shape[1], w.shape[0], (R, S), padding=pad, stride=stride, bias=False).cuda().type(w.dtype)
   conv2d.weight.data.copy_(mask_weights(w, layout, block))
   # run conv2d
   y = conv2d(x)
-  return y, None, None
   # backward
   y.backward(dy)
   dx = x.grad.clone()
@@ -258,16 +257,16 @@ def run_conv2d_reference(x, w, dy, layout, block):
   x.grad.zero_()
   return y, dx, dw
 
-def run_conv2d_triton(x, w, dy, layout, block):
+def run_conv2d_triton(x, w, dy, pad, stride, layout, block):
   # create conv2d
   N, C, H, W = x.shape
+  _, _, R, S = layout.shape
   K = dy.shape[1]
-  sparse_conv2d = SparseConv2d(layout, block, N, C, H, W, dy.shape[2], dy.shape[3], K)
+  sparse_conv2d = SparseConv2d(layout, block, N, C, H, W, dy.shape[2], dy.shape[3], K, R, S, stride[0], stride[1], pad[0], pad[1])
   # run conv2d
   w = compress_weights(w, layout, block)
   w.retain_grad()
-  y = sparse_conv2d(x, w)
-  return y, None, None
+  y = sparse_conv2d(x, w, pad[0], pad[1], stride[0], stride[1])
   # backward
   y.backward(dy)
   dx = x.grad.clone()
@@ -275,23 +274,27 @@ def run_conv2d_triton(x, w, dy, layout, block):
   x.grad.zero_()
   return y, dx, dw
 
-def test_conv2d(N, C, H, W, K, R, S, rho, block):
+def test_conv2d(N, C, H, W, K, R, S, pad, stride, rho, block):
   # probability distribution
   probs = torch.Tensor([rho, 1-rho])
   generator = torch.distributions.categorical.Categorical(probs)
   # initialize tensors
   layout = generator.sample((K//block, C//block, R, S))
-  dtype = torch.float16
-  x = torch.rand((N, C, H, W), requires_grad=True).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
-  w = torch.rand((K, C, R, S), requires_grad=True).cuda().type(dtype)
-  dy = torch.rand((N, K, H - R + 1, W - S + 1)).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
+  dtype = torch.float32
+  P = (H + 2*pad[0] - R)//stride[0] + 1
+  Q = (W + 2*pad[1] - S)//stride[1] + 1
+  x = torch.ones((N, C, H, W), requires_grad=True).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
+  w = torch.ones((K, C, R, S), requires_grad=True).cuda().type(dtype)
+  dy = torch.ones((N, K, P, Q)).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
   x.retain_grad()
   w.retain_grad()
   # execute
-  ry, rdx, rdw = run_conv2d_reference(x, w, dy, layout, block)
-  ty, tdx, tdw = run_conv2d_triton(x, w, dy, layout, block)
+  ry, rdx, rdw = run_conv2d_reference(x, w, dy, pad, stride, layout, block)
+  ty, tdx, tdw = run_conv2d_triton(x, w, dy, pad, stride, layout, block)
+  print(rdx[0,0,:,:])
+  print(tdx[0,0,:,:])
   print((ry - ty).abs().max())
-  #print((rdx - tdx).abs().max())
+  print((rdx - tdx).abs().max())
   #print((rdw - tdw).abs().max())
 
 #############
@@ -307,5 +310,5 @@ if __name__ == '__main__':
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
-  test_conv2d(32, 512, 15, 15, 512, 3, 3, 0., 32)
+  test_conv2d(32, 32, 16, 16, 32, 3, 3, (0, 0), (2, 2), 0., 32)
   pass
