@@ -175,7 +175,7 @@ class _sparse_conv2d(torch.autograd.Function):
     return _sparse_conv2d.locks
 
   @staticmethod
-  def make_dds_lut(layout, block, step, is_dx, strides):
+  def make_dds_lut(layout, block, step, is_dx, strides, full_layout, off_bh, off_bw, stride_bh, stride_bw):
     headers  = torch.empty((0,), dtype=torch.int64)
     a_deltas = torch.empty((0,), dtype=torch.int64)
     b_deltas = torch.empty((0,), dtype=torch.int64) 
@@ -186,10 +186,11 @@ class _sparse_conv2d(torch.autograd.Function):
     if is_dx:
       size = layout.sum()
       # blocks are stored in order KRSC
-      block_id = layout.clone().permute(0, 2, 3, 1).contiguous()
-      block_id[block_id > 0] = 1 + torch.arange(size)
+      block_id = full_layout.clone().permute(0, 2, 3, 1).contiguous()
+      block_id[block_id > 0] = 1 + torch.arange(full_layout.sum())
       # blocks are traversed in order CRSK
       block_id = block_id.permute(3, 1, 2, 0).contiguous()
+      block_id = block_id[:, off_bh::stride_bh, off_bw::stride_bw, :]
       b_offset = block_id[block_id > 0] - 1
       b_offset = b_offset * block * block
       b_deltas = b_offset.clone()
@@ -398,8 +399,8 @@ class _sparse_conv2d(torch.autograd.Function):
           kernel(aa, b, cc,
                 N, P, Q, K,
                 pad_h, pad_w, 
-                stride_h, stride_w,
-                aa.stride(0), aa.stride(2), aa.stride(3),
+                1, 1,
+                a.stride(0), a.stride(2), a.stride(3),
                 cc.stride(0), cc.stride(2), cc.stride(3),
                 da_lut, da_locks, da_num_locks, 
                 grid = lambda opt: [da_width, triton.cdiv(N*P*Q, opt.d('TM'))], 
@@ -506,7 +507,7 @@ class SparseConv2d:
     self.block = block
 
     # Look-up tables for forward pass
-    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, _sparse_conv2d._step, False, [1, C, C*W])
+    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, _sparse_conv2d._step, False, [1, C, C*W], None, None, None, None, None)
     # Look-up tables for data gradient
     # have to be careful here
     # the gradient of strided conv is a conv over a sparse image
@@ -524,11 +525,12 @@ class SparseConv2d:
           da_lut, da_num_locks, da_width = None
         else:
           curr_layout = layout[:, :, off_bh::stride_h, off_bw::stride_w]
-          da_lut, da_num_locks, da_width = _sparse_conv2d.make_dds_lut(curr_layout, block, _sparse_conv2d._step, True, [1, K, K*QQ])
+          da_lut, da_num_locks, da_width = _sparse_conv2d.make_dds_lut(curr_layout, block, _sparse_conv2d._step, True, [1, K, K*QQ], layout, off_bh, off_bw, stride_h, stride_w)
         self.da_lut.append(da_lut)
         self.da_num_locks.append(da_num_locks)
         self.da_width.append(da_width)
         self.da_offs.append((off_ah, off_aw, off_bh, off_bw, off_ch, off_cw))
+        
     # look-up tables for weight gradients
     self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
     db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 16)

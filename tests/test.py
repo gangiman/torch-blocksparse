@@ -283,9 +283,9 @@ def test_conv2d(N, C, H, W, K, R, S, pad, stride, rho, block):
   dtype = torch.float32
   P = (H + 2*pad[0] - R)//stride[0] + 1
   Q = (W + 2*pad[1] - S)//stride[1] + 1
-  x = torch.ones((N, C, H, W), requires_grad=True).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
-  w = torch.ones((K, C, R, S), requires_grad=True).cuda().type(dtype)
-  dy = torch.ones((N, K, P, Q)).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
+  x = torch.rand((N, C, H, W), requires_grad=True).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
+  w = torch.rand((K, C, R, S), requires_grad=True).cuda().type(dtype)
+  dy = torch.rand((N, K, P, Q)).cuda().contiguous(memory_format=torch.channels_last).type(dtype)
   x.retain_grad()
   w.retain_grad()
   # execute
