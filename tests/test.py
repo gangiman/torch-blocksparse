@@ -308,5 +308,5 @@ if __name__ == '__main__':
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
-  test_conv2d(32, 32, 16, 16, 32, 3, 3, (0, 0), (2, 2), 0., 32)
+  test_conv2d(32, 32, 16, 16, 32, 3, 3, (1, 1), (2, 2), 0., 32)
   pass
