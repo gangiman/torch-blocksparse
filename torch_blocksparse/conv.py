@@ -308,7 +308,7 @@ class _sparse_conv2d(torch.autograd.Function):
         # create headers
         size = nnz.shape[0]*div
         hh = torch.tensor([a_deltas_start, b_deltas_start[k], size*step, k], dtype=torch.int64)
-        a_deltas_start += size
+        a_deltas_start += 3*size
         headers = torch.cat((headers, hh))
         # update width
         width += 1

@@ -291,6 +291,7 @@ def test_conv2d(N, C, H, W, K, R, S, pad, stride, rho, block):
   # execute
   ry, rdx, rdw = run_conv2d_reference(x, w, dy, pad, stride, layout, block)
   ty, tdx, tdw = run_conv2d_triton(x, w, dy, pad, stride, layout, block)
+  #print(rdx[0,32,:,:] - tdx[0,32,:,:])
   print((ry - ty).abs().max())
   print((rdx - tdx).abs().max())
   print((rdw - tdw).abs().max())
@@ -308,5 +309,5 @@ if __name__ == '__main__':
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, False, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, False, True, 32)
   #  test_mm(3, 2, 256, 512, 384, 0.5, mode, True, True, 32)
-  test_conv2d(32, 32, 16, 16, 32, 3, 3, (1, 1), (2, 2), 0., 32)
+  test_conv2d(32, 512, 16, 16, 512, 3, 3, (1, 1), (2, 2), 0.5, 32)
   pass
