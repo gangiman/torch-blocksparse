@@ -262,15 +262,13 @@ def run_conv2d_triton(x, w, dy, pad, stride, layout, block):
   N, C, H, W = x.shape
   _, _, R, S = layout.shape
   K = dy.shape[1]
-  sparse_conv2d = SparseConv2d(layout, block, N, C, H, W, dy.shape[2], dy.shape[3], K, R, S, stride[0], stride[1], pad[0], pad[1])
-  # run conv2d
-  w = compress_weights(w, layout, block)
-  w.retain_grad()
-  y = sparse_conv2d(x, w, pad[0], pad[1], stride[0], stride[1])
+  conv2d = SparseConv2d(w.shape[1], w.shape[0], (R, S), layout, block, padding=pad, stride=stride).cuda().type(w.dtype)
+  conv2d.weight.data.copy_(compress_weights(w, layout, block))
+  y = conv2d(x)
   # backward
   y.backward(dy)
   dx = x.grad.clone()
-  dw = w.grad.clone()
+  dw = conv2d.weight.grad.clone()
   x.grad.zero_()
   return y, dx, dw
 

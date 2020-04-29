@@ -563,64 +563,105 @@ class _sparse_conv2d(torch.autograd.Function):
            None, None, None, None
 
 
-class SparseConv2d:
+class SparseConv2d(torch.nn.Module):
 
   sparse_conv2d = _sparse_conv2d.apply
 
-  def __init__(self, layout, block, N, C, H, W, P, Q, K, R, S, stride_h, stride_w, pad_h, pad_w):
-    # attributes
+  def precompute_lut(self, nchwkrspq, stride_h, stride_w, pad_h, pad_w):
+    key = (nchwkrspq, stride_h, stride_w, pad_h, pad_w)
+    N, C, H, W, K, R, S, P, Q = nchwkrspq
+    if key not in self.lut_cache:
+      # Look-up tables for forward pass
+      c_lut,  c_num_locks, c_width  = _sparse_conv2d.make_dds_lut(self.layout, self.block, _sparse_conv2d._step, 
+                                                                  False, [1, C, C*W], None, None, None, None, None)
+      # Look-up tables for data gradient
+      # have to be careful here
+      # the gradient of strided conv is a conv over a sparse image
+      # which can be decomposed as a set of smaller convs
+      da_lut, da_num_locks, da_width = [], [], []
+      da_offs = []
+      for off_ch in range(stride_h):
+        for off_cw in range(stride_w):
+          off_bh = (off_ch + pad_h) % stride_h
+          off_bw = (off_cw + pad_w) % stride_w
+          a_pad_h = int((pad_h + (stride_h - 1)*off_ch) / stride_h)
+          a_pad_w = int((pad_w + (stride_w - 1)*off_cw) / stride_w)
+          if off_bh >= R or off_bw >= S:
+            lut, num_locks, width = None
+          else:
+            curr_layout = self.layout[:, :, off_bh::stride_h, off_bw::stride_w]
+            lut, num_locks, width = _sparse_conv2d.make_dds_lut(curr_layout, self.block, _sparse_conv2d._step, 
+                                                                True, [1, K, K*Q], self.layout, off_bh, off_bw, stride_h, stride_w)
+          da_lut.append(lut)
+          da_num_locks.append(num_locks)
+          da_width.append(width)
+          da_offs.append((a_pad_h, a_pad_w, off_bh, off_bw, off_ch, off_cw))
+      # look-up tables for weight gradients
+      db_lut, db_num_locks, db_width = _sparse_conv2d.make_sdd_lut(self.layout, self.block)
+      db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 16,
+                                                transform_h = lambda h: h*stride_h - pad_h,
+                                                transform_w = lambda w: w*stride_w - pad_w)
+      db_delta_b = _sparse_conv2d.make_db_delta(N, P, Q, K*Q*P, K*Q, K, 16)
+      db_lut = torch.cat((db_lut, db_delta_a, db_delta_b))
+      # store results
+      self.lut_cache[key] = (c_lut, c_num_locks, c_width, \
+                             da_lut, da_num_locks, da_width, da_offs, \
+                             db_lut, db_num_locks, db_width)
+    return self.lut_cache[key]
+
+  def __init__(self, in_channels, out_channels, kernel_size, layout, block, padding = (0,0), stride = (1,1), bias = False):
+    super(SparseConv2d, self).__init__()
+    self.lut_cache = dict()
     self.layout = layout
     self.block = block
-    self.nchwkrspq = N, C, H, W, K, R, S, P, Q
+    self.in_channels = in_channels
+    self.out_channels = out_channels
+    self.kernel_size = kernel_size
+    self.stride = stride
+    self.padding = padding
+    self.weight = torch.nn.Parameter(torch.Tensor(layout.sum(), block, block), requires_grad=True)
+    assert bias == False
 
-    # Look-up tables for forward pass
-    self.c_lut,  self.c_num_locks,  self.c_width  = _sparse_conv2d.make_dds_lut(layout, block, _sparse_conv2d._step, False, [1, C, C*W], None, None, None, None, None)
-    # Look-up tables for data gradient
-    # have to be careful here
-    # the gradient of strided conv is a conv over a sparse image
-    # which can be decomposed as a set of smaller convs
-    self.da_lut, self.da_num_locks, self.da_width = [], [], []
-    self.da_offs = []
-    for off_ch in range(stride_h):
-      for off_cw in range(stride_w):
-        off_bh = (off_ch + pad_h) % stride_h
-        off_bw = (off_cw + pad_w) % stride_w
-        a_pad_h = int((pad_h + (stride_h - 1)*off_ch) / stride_h)
-        a_pad_w = int((pad_w + (stride_w - 1)*off_cw) / stride_w)
-        if off_bh >= R or off_bw >= S:
-          da_lut, da_num_locks, da_width = None
-        else:
-          curr_layout = layout[:, :, off_bh::stride_h, off_bw::stride_w]
-          da_lut, da_num_locks, da_width = _sparse_conv2d.make_dds_lut(curr_layout, block, _sparse_conv2d._step, True, [1, K, K*Q], layout, off_bh, off_bw, stride_h, stride_w)
-        self.da_lut.append(da_lut)
-        self.da_num_locks.append(da_num_locks)
-        self.da_width.append(da_width)
-        self.da_offs.append((a_pad_h, a_pad_w, off_bh, off_bw, off_ch, off_cw))
-        
-    # look-up tables for weight gradients
-    self.db_lut, self.db_num_locks, self.db_width = _sparse_conv2d.make_sdd_lut(layout, block)
-    db_delta_a = _sparse_conv2d.make_db_delta(N, P, Q, C*W*H, C*W, C, 16,
-                                              transform_h = lambda h: h*stride_h - pad_h,
-                                              transform_w = lambda w: w*stride_w - pad_w)
-    db_delta_b = _sparse_conv2d.make_db_delta(N, P, Q, K*Q*P, K*Q, K, 16)
-    self.db_lut = torch.cat((self.db_lut, db_delta_a, db_delta_b))
+  def reset_parameters(self):
+    torch.nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+    if self.bias is not None:
+        fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+        bound = 1 / math.sqrt(fan_in)
+        init.uniform_(self.bias, -bound, bound)
 
-    # timings
-    self.bench = False
-    self.c_time = [None]
-    self.da_time = [None]
-    self.db_time = [None]
-  
-  @staticmethod
-  def clear_cache():
-    pass
+  def extra_repr(self):
+    s = ('{in_channels}, {out_channels}, kernel_size={kernel_size}'
+          ', stride={stride}, block_sparsity={block_sparsity}, block_size={block_size}')
+    if self.padding != (0,) * len(self.padding):
+        s += ', padding={padding}'
+    if self.dilation != (1,) * len(self.dilation):
+        s += ', dilation={dilation}'
+    if self.groups != 1:
+        s += ', groups={groups}'
+    if self.bias is None:
+        s += ', bias=False'
+    if self.padding_mode != 'zeros':
+        s += ', padding_mode={padding_mode}'
+    return s.format(**self.__dict__)
 
-  def __call__(self, a, b, pad_h, pad_w, stride_h, stride_w):
-    c = SparseConv2d.sparse_conv2d(a, b, 
-                                  self.nchwkrspq, pad_h, pad_w, stride_h, stride_w,
+  def __call__(self, a):
+    N, C, H, W  = a.shape
+    K, Cb, R, S = self.out_channels, self.in_channels, self.kernel_size[0], self.kernel_size[1]
+    P = (H + 2*self.padding[0] - R)//self.stride[0] + 1
+    Q = (W + 2*self.padding[1] - S)//self.stride[1] + 1
+    assert C == Cb
+    nchwkrspq = N, C, H, W, K, R, S, P, Q
+    # look-up tables
+    c_lut, c_num_locks, c_width,\
+    da_lut, da_num_locks, da_width, da_offs,\
+    db_lut, db_num_locks, db_width = self.precompute_lut(nchwkrspq, self.stride[0], self.stride[1],\
+                                                         self.padding[0], self.padding[1])
+    # run kernel
+    c = SparseConv2d.sparse_conv2d(a, self.weight, 
+                                  nchwkrspq, self.padding[0], self.padding[1], self.stride[0], self.stride[1],
                                   self.layout, self.block,
-                                  self.c_lut, self.c_num_locks, self.c_width,
-                                  self.da_lut, self.da_num_locks, self.da_width, self.da_offs,
-                                  self.db_lut, self.db_num_locks, self.db_width,
-                                  self.bench, self.c_time, self.da_time, self.db_time)
+                                  c_lut, c_num_locks, c_width,
+                                  da_lut, da_num_locks, da_width, da_offs,
+                                  db_lut, db_num_locks, db_width,
+                                  False, [None], [None], [None])
     return c
