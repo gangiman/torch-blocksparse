@@ -37,32 +37,34 @@ src = '''
     int L = N*P*Q;
     int lockid = 0;
     int maxid = TZ;
+    // pointers to A
     int* p_delta = lut + get_num_programs(0)*4;
     int* pa_delta[TL] = p_delta + 0 ... TL;
-    int* pb_delta[TL] = p_delta + N*P*Q + TL + 0 ... TL;
     int  a_delta[TL]  = *pa_delta;
-    int  b_delta[TL]  = *pb_delta;
     int  ra_c[TM] = off_cc * TM + 0 ... TM;
-    int  rb_k[TN] = off_ck * TN + 0 ... TN;
     TYPE* pa[TM, TL] = A + ra_c[:, newaxis] * 1
                          + off_cr * stride_ha
                          + off_cs * stride_wa
                          + a_delta[newaxis, :];
+    // pointers to B
+    int*  pb_delta[TL] = p_delta + N*P*Q + TL + 0 ... TL;
+    int   b_delta[TL]  = *pb_delta;
+    int   rb_k[TN] = off_ck * TN + 0 ... TN;
     TYPE* pb[TL, TN] = B + rb_k[newaxis, :] * 1
                          + b_delta[:, newaxis];
-    int  ra_nhw[TL] = 0 ... TL;
-    int  ra_nh[TL]  = ra_nhw / Q;
-    int  ra_w [TL]  = (ra_nhw % Q)*stride_w;
-    int  ra_h [TL]  = (ra_nh % P)*stride_h;
+    // bounds for bound-checking
     int  h_lo = 0 + pad_h - off_cr;
     int  h_hi = H + pad_h - off_cr;
     int  w_lo = 0 + pad_w - off_cs;
     int  w_hi = W + pad_w - off_cs;
-    // prefetch
+    int  ra_nhw[TL] = 0 ... TL;
+    int  ra_nh[TL]  =  ra_nhw / Q;
+    int  ra_w [TL]  = (ra_nhw % Q)*stride_w;
+    int  ra_h [TL]  = (ra_nh  % P)*stride_h;
+    // bounds-checking
     bool checkal[TL] = ra_h >= h_lo && ra_h < h_hi && 
                        ra_w >= w_lo && ra_w < w_hi;
-    bool checka[TM, TL] = checkal[newaxis, :];
-    bool checkb[TL, TN] = 1;
+    bool checkam[TM] = 1;
 #else
     // load LUT header
     int *header = lut + pid0 * 4;
@@ -82,17 +84,17 @@ src = '''
     int a_delta  __multipleof(TL) = *pa_delta;
     int ra_n  [TM]    = rc_n;
 #ifdef DX
-    int ra_h  [TM]    = rc_p * stride_h + pad_h;
-    int ra_w  [TM]    = rc_q * stride_w + pad_w;
+    int ra_h_0[TM]    = rc_p * stride_h + pad_h;
+    int ra_w_0[TM]    = rc_q * stride_w + pad_w;
 #else
-    int ra_h  [TM]    = rc_p * stride_h - pad_h;
-    int ra_w  [TM]    = rc_q * stride_w - pad_w;
+    int ra_h_0[TM]    = rc_p * stride_h - pad_h;
+    int ra_w_0[TM]    = rc_q * stride_w - pad_w;
 #endif
     int ra_c  [TL]    = 0 ... TL;
-    int offa[TM, TL]  = a_delta + ra_n[:, newaxis] * stride_na
-                                + ra_h[:, newaxis] * stride_ha
-                                + ra_w[:, newaxis] * stride_wa
-                                + ra_c[newaxis, :] * 1;
+    int offa[TM, TL]  = a_delta + ra_n  [:, newaxis] * stride_na
+                                + ra_h_0[:, newaxis] * stride_ha
+                                + ra_w_0[:, newaxis] * stride_wa
+                                + ra_c  [newaxis, :] * 1;
     TYPE* pa[TM, TL]  = A + offa;
     // initialize b pointers
     int  rb_k[TN]     = 0 ... TN;
@@ -105,17 +107,19 @@ src = '''
     int r = *(pa_delta + 1);
     int s = *(pa_delta + 2);
 #ifdef DX
-      int ra_hh[TM] = ra_h - r;
-      int ra_ww[TM] = ra_w - s;
+      int ra_h[TM] = ra_h_0 - r;
+      int ra_w[TM] = ra_w_0 - s;
 #else
-      int ra_hh[TM] = ra_h + r;
-      int ra_ww[TM] = ra_w + s;
+      int ra_h[TM] = ra_h_0 + r;
+      int ra_w[TM] = ra_w_0 + s;
 #endif
-    bool checkam[TM]    = ra_hh >= 0 && ra_hh < H && 
-                          ra_ww >= 0 && ra_ww < W;
-    bool checka[TM, TL] = checkam[:, newaxis];
+    // bounds-checking
+    bool checkam[TM]    = ra_h >= 0 && ra_h < H && 
+                          ra_w >= 0 && ra_w < W;
+    bool checkal[TL]    = 1;
+#endif
+    bool checka[TM, TL] = checkam[:, newaxis] && checkal[newaxis, :];
     bool checkb[TL, TN] = 1;
-#endif
     TYPE a[TM, TL] = checka ? *pa : 0;
     TYPE b[TL, TN] = checkb ? *pb : 0;
 
@@ -135,10 +139,10 @@ src = '''
       ra_nh   =  ra_nhw / Q;
       ra_w    = (ra_nhw % Q)*stride_w;
       ra_h    = (ra_nh  % P)*stride_h;
+      bool checkam[TM] = 1;
       bool checkal[TL] = ra_h >= h_lo && ra_h < h_hi && 
-                         ra_w >= w_lo && ra_w < w_hi;
-      bool checkal2[TL] = l > TL;
-      bool checka[TM, TL] = checkal[newaxis, :] && checkal2[newaxis, :];
+                         ra_w >= w_lo && ra_w < w_hi &&
+                         (bool[TL])(l > TL);
 #else
       // update pointers
       pa_delta += 3;
@@ -150,19 +154,21 @@ src = '''
       int r = *(pa_delta + 1);
       int s = *(pa_delta + 2);
 #ifdef DX
-      int ra_hh[TM] = ra_h - r;
-      int ra_ww[TM] = ra_w - s;
+      int ra_h[TM] = ra_h_0 - r;
+      int ra_w[TM] = ra_w_0 - s;
 #else
-      int ra_hh[TM] = ra_h + r;
-      int ra_ww[TM] = ra_w + s;
+      int ra_h[TM] = ra_h_0 + r;
+      int ra_w[TM] = ra_w_0 + s;
 #endif
-      bool checkam[TM] = ra_hh >= 0 && ra_hh < H &&
-                         ra_ww >= 0 && ra_ww < W; 
-      bool checkal[TL] = l > TL;
-      bool checka[TM, TL] = checkam[:, newaxis] && checkal[newaxis, :];
+      bool checkam[TM] = ra_h >= 0 && ra_h < H &&
+                         ra_w >= 0 && ra_w < W; 
+      bool checkal[TL] = 1;
 #endif
       // pre-fetch
-      bool checkb[TL, TN] = l > TL;
+      bool do_prefetch[TL] = l > TL;
+      bool checka[TM, TL] = checkam[:, newaxis] && checkal[newaxis, :] && 
+                            do_prefetch[newaxis, :];
+      bool checkb[TL, TN] = do_prefetch[:, newaxis];
       a = checka ? *pa : 0;
       b = *?(checkb)pb;
     }
@@ -439,6 +445,7 @@ class _sparse_conv2d(torch.autograd.Function):
                'STRIDE_BC': block if is_dx else 1}
     if is_dx:
       defines['DX'] = True
+      defines['TRANSFORM_H'] = 'rc_p * stride_h + pad_h'
     cache = _sparse_conv2d.dds_cache
     kernel = _sparse_conv2d.make_kernel(src, defines, cache, (block, a.dtype, is_dx), num_warps=[4])
     # create output
@@ -572,9 +579,6 @@ class SparseConv2d:
     # have to be careful here
     # the gradient of strided conv is a conv over a sparse image
     # which can be decomposed as a set of smaller convs
-    #da_pad_h = (H - P*stride_h + R - 1)//2
-    #da_pad_w = (W - Q*stride_w + S - 1)//2
-    #print(da_pad_h, da_pad_w)
     self.da_lut, self.da_num_locks, self.da_width = [], [], []
     self.da_offs = []
     for off_ch in range(stride_h):
@@ -606,6 +610,10 @@ class SparseConv2d:
     self.c_time = [None]
     self.da_time = [None]
     self.db_time = [None]
+  
+  @staticmethod
+  def clear_cache():
+    pass
 
   def __call__(self, a, b, pad_h, pad_w, stride_h, stride_w):
     c = SparseConv2d.sparse_conv2d(a, b, 
